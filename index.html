@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mercados en EUR</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  body{margin:0;background:#111;color:#ddd;font:14px system-ui,sans-serif}
+  header{padding:8px 16px;color:#888;font-size:12px}
+  #grid{display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(2,calc(50vh - 30px));gap:8px;padding:8px}
+  .card{background:#000;border:1px solid #333;border-radius:6px;padding:8px;display:flex;flex-direction:column;min-height:260px;min-width:0}
+  .card h2{margin:0 0 4px;font-size:14px;display:flex;justify-content:space-between;gap:8px}
+  .card h2 span{font-weight:400;color:#aaa}
+  .cv{position:relative;flex:1;min-height:0}
+  .err{color:#f66;padding:8px}
+  @media(max-width:1000px){#grid{grid-template-columns:1fr;grid-template-rows:none;grid-auto-rows:340px}}
+</style>
+</head>
+<body>
+<header id="info">Cargando datos…</header>
+<div id="grid"></div>
+<script src="datos.js" onerror="void 0"></script>
+<script>
+// ===== CONFIGURACIÓN (todos en EUR). Puedes cambiar los tickers de Yahoo Finance =====
+const ACTIVOS = [
+  {nombre:'MSCI World (iShares IWDA, EUR)',     t:'IWDA.AS',        caidas:[-15,-25,-35]},
+  {nombre:'Nasdaq 100 (Invesco EQQQ, EUR)',      t:'EQQQ.DE',        caidas:[-20,-30,-45]},
+  {nombre:'Emerging Markets (iShares EMIM, EUR)',t:'EMIM.AS',        caidas:[-20,-30,-40]},
+  {nombre:'Oro (Xetra-Gold, EUR)',               t:'4GLD.DE',        caidas:[-10,-15,-20]},
+  {nombre:'Bitcoin (BTC-EUR)',                   t:'BTC-EUR',        caidas:[-35,-50,-70]},
+  {nombre:'Fondo monetario FR0000447823',        t:'FR0000447823',   caidas:[]}   // un ISIN se resuelve solo
+];
+const RANGO = '5y';         // histórico que se descarga
+const VENTANA_DIAS = 5*365; // tramo mostrado
+// Yahoo no permite CORS desde el navegador: se usa un proxy. Si uno falla, prueba el siguiente.
+const PROXIES = [u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+                 u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
+                 u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),
+                 u=>'https://thingproxy.freeboard.io/fetch/'+u];
+// Si tienes un proxy propio, ponlo aquí y se probará primero (p.ej. 'http://localhost:8787/?url=')
+const PROXY_PROPIO = '';
+// ===================================================================================
+
+async function getJSON(url){
+  const lista=(PROXY_PROPIO?[u=>PROXY_PROPIO+encodeURIComponent(u)]:[]).concat(PROXIES);
+  const fallos=[];
+  for(const p of lista){
+    try{ const r=await fetch(p(url)); if(!r.ok) throw new Error('HTTP '+r.status); return await r.json(); }
+    catch(e){ fallos.push(new URL(p('x')).hostname+': '+e.message); }
+  }
+  throw new Error(fallos.join(' | '));
+}
+async function resolver(t){
+  if(!/^[A-Z]{2}[A-Z0-9]{10}$/.test(t)) return t;
+  const j=await getJSON('https://query1.finance.yahoo.com/v1/finance/search?q='+t);
+  const q=(j.quotes||[])[0]; if(!q) throw new Error('ISIN no encontrado en Yahoo');
+  return q.symbol;
+}
+async function historico(sym){
+  const j=await getJSON(`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?range=${RANGO}&interval=1d`);
+  const r=j.chart.result[0], ts=r.timestamp, c=r.indicators.quote[0].close, out=[];
+  ts.forEach((x,i)=>{ if(c[i]!=null) out.push({d:new Date(x*1000).toISOString().slice(0,10),p:c[i]}); });
+  const last=r.meta.regularMarketPrice;
+  if(last!=null){ const hoy=new Date().toISOString().slice(0,10);
+    if(out.length && out[out.length-1].d===hoy) out[out.length-1].p=last; else out.push({d:hoy,p:last}); }
+  return out;
+}
+function semana(d){ const x=new Date(d); const day=(x.getUTCDay()+6)%7; x.setUTCDate(x.getUTCDate()-day); return x.toISOString().slice(0,10); }
+function mediaSemanal(datos,n){
+  // último cierre de cada semana -> SMA de n semanas, colocada en el último día de esa semana
+  const w=[]; datos.forEach((o,i)=>{ const k=semana(o.d); if(w.length&&w[w.length-1].k===k) w[w.length-1]={k,i,p:o.p}; else w.push({k,i,p:o.p}); });
+  const res=new Array(datos.length).fill(null);
+  for(let j=n-1;j<w.length;j++){ let s=0; for(let m=j-n+1;m<=j;m++) s+=w[m].p; res[w[j].i]=s/n; }
+  return res;
+}
+function dibujar(a,datos){
+  const card=document.createElement('div'); card.className='card';
+  let maxI=0; datos.forEach((o,i)=>{ if(o.p>=datos[maxI].p) maxI=i; });
+  const max=datos[maxI].p, ult=datos[datos.length-1].p, dd=(ult/max-1)*100;
+  const m50=mediaSemanal(datos,50), m100=mediaSemanal(datos,100);
+  const ini=Math.min(maxI,Math.max(0,datos.length-VENTANA_DIAS));
+  const v=datos.slice(ini), N=v.length, sl=x=>x.slice(ini);
+  const minTrasMax=Math.min(...datos.slice(maxI).map(o=>o.p));
+  card.innerHTML=`<h2>${a.nombre}<span>${ult.toFixed(2)} € · máx ${max.toFixed(2)} € (${datos[maxI].d}) · ${dd.toFixed(1)}%</span></h2><div class="cv"><canvas></canvas></div>`;
+  document.getElementById('grid').appendChild(card);
+  const ds=[
+    {label:'Precio',data:v.map(o=>o.p),borderColor:'#00e050',borderWidth:1.5,pointRadius:0,order:2},
+    {label:'MM 50 sem',data:sl(m50),borderColor:'rgba(255,60,60,.5)',borderWidth:1,pointRadius:0,spanGaps:true,order:3},
+    {label:'MM 100 sem',data:sl(m100),borderColor:'rgba(70,130,255,.5)',borderWidth:1,pointRadius:0,spanGaps:true,order:3},
+    {label:'Máximo',data:v.map((o,i)=>i===maxI-ini?o.p:null),borderColor:'gold',backgroundColor:'gold',showLine:false,pointStyle:'star',pointRadius:9,order:1}
+  ];
+  a.caidas.forEach(c=>{
+    const nivel=max*(1+c/100), cruzado=minTrasMax<=nivel;
+    ds.push({label:`${c}% (${nivel.toFixed(2)})`,data:new Array(N).fill(nivel),borderColor:cruzado?'#ff2020':'#fff',
+             borderWidth:1,borderDash:[6,4],pointRadius:0,order:4});
+  });
+  new Chart(card.querySelector('canvas'),{type:'line',data:{labels:v.map(o=>o.d),datasets:ds},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:'#888',maxTicksLimit:6},grid:{color:'#1a1a1a'}},y:{ticks:{color:'#888'},grid:{color:'#1a1a1a'}}}}});
+}
+(async()=>{
+  await Promise.all(ACTIVOS.map(async a=>{
+    try{ const s=await resolver(a.t); a.datos=await historico(s); }
+    catch(e){
+      if(window.DATOS&&DATOS.series[a.t]){ a.datos=DATOS.series[a.t]; a.offline=true; }
+      else a.error=e.message;
+    }
+  }));
+  ACTIVOS.forEach(a=>{
+    if(a.datos) dibujar(a,a.datos);
+    else{ const d=document.createElement('div'); d.className='card'; d.innerHTML=`<h2>${a.nombre}</h2><div class="err">No se pudieron obtener datos (${a.error})</div>`; document.getElementById('grid').appendChild(d); }
+  });
+  const off=ACTIVOS.some(a=>a.offline);
+  document.getElementById('info').textContent=(off?'Datos de datos.js (generados el '+DATOS.fecha+') · ':'Actualizado: '+new Date().toLocaleString('es-ES'))+' · Datos: Yahoo Finance · Línea verde = cierre; rojo/azul = media móvil 50/100 semanas; ★ = máximo; líneas discontinuas = niveles de caída (rojo si ya se cruzaron tras el máximo).';
+})();
+</script>
+</body>
+</html>
